@@ -19,7 +19,7 @@ Windows is not supported — Valkey (a C project built around POSIX) does not co
 
 ## Download
 
-Binaries are available on the [Releases](https://github.com/Aletherium/valkey-server/releases) page. Each release includes SHA256 checksums.
+Binaries are available on the [Releases](https://github.com/gabion-dev/valkey-server/releases) page. Each release includes SHA256 checksums.
 
 ## Build details
 
