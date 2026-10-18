@@ -39,6 +39,6 @@ These are development binaries optimized for portability, not production perform
 
 Built from [valkey-io/valkey](https://github.com/valkey-io/valkey) — the open-source high-performance key/value store.
 
-Distributed under the [BSD 3-Clause License](LICENSE), the same license as Valkey.
+The binaries are Valkey and stay under its BSD 3-Clause License; every release carries the upstream license text as the `LICENSE` asset next to the binaries, as the license asks of binary distributions. The build scripts of this repository are under the [BSD 3-Clause License](LICENSE) as well.
 
 This project is NOT affiliated with, endorsed by, or sponsored by the Valkey contributors or the Linux Foundation.

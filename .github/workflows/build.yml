@@ -142,6 +142,15 @@ jobs:
         with:
           merge-multiple: true
 
+      # Valkey is BSD-3-Clause software, and the license asks for its notice
+      # in binary distributions too: the release carries the upstream license
+      # text (the COPYING file of the tag the binaries were built from).
+      - name: Fetch the Valkey license text
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://raw.githubusercontent.com/valkey-io/valkey/${{ github.event.inputs.valkey_tag }}/COPYING" -o LICENSE
+          grep -q "Redistribution and use in source and binary forms" LICENSE
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -167,6 +176,7 @@ jobs:
             Built from: https://github.com/valkey-io/valkey/tree/${{ github.event.inputs.valkey_tag }}
 
             ## License
-            BSD 3-Clause License
+            BSD 3-Clause License — the upstream text is the `LICENSE` asset.
           files: |
             valkey-server-*
+            LICENSE
