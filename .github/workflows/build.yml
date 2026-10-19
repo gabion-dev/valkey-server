@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       valkey_tag:
-        description: 'valkey-io/valkey tag to build (e.g. 9.0.3)'
+        description: 'valkey-io/valkey tag to build (e.g. 9.1.2)'
         required: true
-        default: '9.0.3'
+        default: '9.1.2'
 
 permissions:
   contents: write
@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Set up QEMU (foreign arch only)
         if: matrix.alpine_arch != 'x86_64'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
@@ -80,7 +80,7 @@ jobs:
           sha256sum "${FILENAME}" > "${FILENAME}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: valkey-server-linux-${{ matrix.arch }}
           path: |
@@ -125,20 +125,85 @@ jobs:
           shasum -a 256 "${FILENAME}" > "${FILENAME}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: valkey-server-darwin-${{ matrix.arch }}
           path: |
             valkey-server-darwin-${{ matrix.arch }}
             valkey-server-darwin-${{ matrix.arch }}.sha256
 
-  release:
+  # The launch guard: every binary is started on a machine of its own
+  # architecture and must report the tag it was built from. A file that
+  # exists proves nothing, and the arm64 Linux build runs under QEMU, where
+  # a check proves nothing either — so verification is a separate job on
+  # native runners, and the release waits for all of them.
+  verify:
     needs: [build-linux, build-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - file: valkey-server-linux-amd64
+            runner: ubuntu-24.04
+          - file: valkey-server-linux-arm64
+            runner: ubuntu-24.04-arm
+          - file: valkey-server-darwin-arm64
+            runner: macos-26
+          - file: valkey-server-darwin-arm64
+            runner: macos-15
+          - file: valkey-server-darwin-amd64
+            runner: macos-26-intel
+          - file: valkey-server-darwin-amd64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Download the binary
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.file }}
+
+      - name: Start it and read its version
+        run: |
+          set -euo pipefail
+          chmod 755 "${{ matrix.file }}"
+          OUT="$(./${{ matrix.file }} --version)"
+          echo "${OUT}"
+          echo "${OUT}" | grep -q "v=${{ github.event.inputs.valkey_tag }} "
+          if [ "$(uname -s)" = "Linux" ] && ldd "${{ matrix.file }}" 2>&1 | grep -q '\.so'; then
+            echo "ERROR: ${{ matrix.file }} is dynamically linked (expected static)" >&2
+            exit 1
+          fi
+
+      # Gabion's rate limiter (bucket4j over Lettuce) runs its
+      # compare-and-swap as a Lua script, and since 9.1 Lua is a separate
+      # module of the build — so the guard runs one. Arguments and the
+      # readiness line are the ones Gabion's dev process uses.
+      - name: Serve and run a Lua script
+        run: |
+          set -euo pipefail
+          PORT=46379
+          ./${{ matrix.file }} --port "${PORT}" --set-proc-title no --bind 127.0.0.1 \
+            --protected-mode yes --save "" --appendonly no --loglevel notice > server.log 2>&1 &
+          PID=$!
+          for _ in $(seq 1 100); do
+            grep -q "Ready to accept connections" server.log && break
+            kill -0 "${PID}" || { cat server.log; exit 1; }
+            sleep 0.1
+          done
+          grep -q "Ready to accept connections" server.log || { cat server.log; exit 1; }
+          REPLY="$(printf '*3\r\n$4\r\nEVAL\r\n$8\r\nreturn 7\r\n$1\r\n0\r\n' | nc -w 2 127.0.0.1 "${PORT}" | tr -d '\r')"
+          kill "${PID}"
+          echo "EVAL reply: ${REPLY}"
+          [ "${REPLY}" = ":7" ]
+
+  release:
+    needs: [verify]
     runs-on: ubuntu-latest
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
@@ -152,7 +217,7 @@ jobs:
           grep -q "Redistribution and use in source and binary forms" LICENSE
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.valkey_tag }}
           name: Valkey ${{ github.event.inputs.valkey_tag }}
@@ -170,7 +235,6 @@ jobs:
             - `valkey-server-darwin-arm64` — macOS ARM64 (Apple Silicon)
 
             Windows is not supported — Valkey does not compile for Windows.
-            On Windows, Gabion Framework uses in-memory rate limiting (single instance).
 
             ## Source
             Built from: https://github.com/valkey-io/valkey/tree/${{ github.event.inputs.valkey_tag }}

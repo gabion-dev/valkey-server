@@ -28,10 +28,13 @@ Linux binaries are statically linked against musl (built inside Alpine):
 - `BUILD_TLS=no` — TLS disabled (not needed for localhost development)
 - `LDFLAGS=-static` — fully static; the binary carries no runtime dependency on any system library
 - ARM64 is built in an aarch64 Alpine environment via QEMU — the same path as x64, with no separate cross-toolchain
+- Lua scripting stays in: since 9.1 Valkey builds it as a module, linked in statically by default
 
 A musl-static binary runs on **any** Linux host — glibc or musl — with nothing installed, and has no runtime NSS dynamic loading (the hidden dependency a static glibc binary would otherwise keep).
 
 macOS binaries link against libSystem, which is always present, so they are self-contained without static linking. The x64 build is cross-compiled on an ARM64 runner with `-arch x86_64`.
+
+Before a release is published, every binary is started on a native machine of its own architecture — Linux x64 and ARM64, macOS 15 and 26 on Apple Silicon and Intel — and must report the tag it was built from, stay static on Linux, serve on localhost and run a Lua script. A check under QEMU proves nothing, so the ARM64 Linux binary is verified on an ARM64 runner.
 
 These are development binaries optimized for portability, not production performance. For production deployments, use the official Valkey packages with jemalloc and TLS support.
 
