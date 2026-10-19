@@ -53,9 +53,16 @@ jobs:
         run: |
           set -euo pipefail
           BIN=valkey/src/valkey-server
+          # glibc's own parts only: libc, libm and the architecture's dynamic
+          # loader, which arm64 binaries name explicitly and x64 ones do not.
           NEEDED="$(readelf -d "${BIN}" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort | tr '\n' ' ')"
           echo "NEEDED: ${NEEDED}"
-          [ "${NEEDED}" = "libc.so.6 libm.so.6 " ] || { echo "ERROR: unexpected library dependencies" >&2; exit 1; }
+          for LIB in ${NEEDED}; do
+            case "${LIB}" in
+              libc.so.6|libm.so.6|ld-linux-x86-64.so.2|ld-linux-aarch64.so.1) ;;
+              *) echo "ERROR: ${LIB} is not part of glibc" >&2; exit 1 ;;
+            esac
+          done
           NEWEST="$(objdump -T "${BIN}" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -uV | tail -1)"
           echo "Newest glibc symbol version: ${NEWEST}"
           [ "$(printf '%s\nGLIBC_2.35\n' "${NEWEST}" | sort -V | tail -1)" = "GLIBC_2.35" ] \
