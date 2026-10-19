@@ -38,8 +38,12 @@ jobs:
           set -euo pipefail
           git clone --depth 1 --branch "${{ github.event.inputs.valkey_tag }}" https://github.com/valkey-io/valkey.git
           cd valkey
+          # One target per make call: the top-level Makefile hands each goal
+          # to its own `make` in src/, so two goals in one parallel call race
+          # on the objects they share and can corrupt one mid-link.
+          make -j"$(nproc)" MALLOC=libc BUILD_TLS=no valkey-server
           # valkey-cli is built for the launch guard only, never released.
-          make -j"$(nproc)" MALLOC=libc BUILD_TLS=no valkey-server valkey-cli
+          make -j"$(nproc)" MALLOC=libc BUILD_TLS=no valkey-cli
 
       # What the binary asks of the host is exactly what the installer checks
       # before downloading it: no library beyond glibc's libc and libm, no
