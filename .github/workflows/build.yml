@@ -14,78 +14,77 @@ permissions:
 
 jobs:
   build-linux:
-    # Linux binaries are built static against musl (Alpine). A musl-static
-    # binary has no runtime NSS dlopen (the latent hole of glibc-static) and
-    # runs on ANY Linux host — glibc or musl — with nothing installed. Both
-    # arches go through the same Alpine path so no cross-toolchain drift can
-    # appear between them.
+    # Linux binaries link the host's glibc dynamically and nothing else, and
+    # are built on the oldest base Gabion supports: glibc is backward
+    # compatible only, so a binary built against glibc 2.35 runs on every
+    # newer distribution (the manylinux practice, PEP 600). A fully static
+    # musl build is not possible since 9.1: the Lua engine is a module, and
+    # the server finds even the built-in one through dlopen(NULL) + dlsym,
+    # which a static musl binary does not have. Ubuntu 22.04 (glibc 2.35) is
+    # the floor Gabion already requires for its Asterisk tree, so an older
+    # base would widen nothing. Both arches build on native runners.
     strategy:
       matrix:
         include:
           - arch: amd64
-            alpine_arch: x86_64
+            runner: ubuntu-22.04
           - arch: arm64
-            alpine_arch: aarch64
-    runs-on: ubuntu-22.04
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
 
     steps:
-      - name: Set up QEMU (foreign arch only)
-        if: matrix.alpine_arch != 'x86_64'
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: arm64
-
-      - name: Set up Alpine (musl) build environment
-        uses: jirutka/setup-alpine@v1
-        with:
-          arch: ${{ matrix.alpine_arch }}
-          packages: build-base linux-headers pkgconf git bash
-
-      - name: Clone and build (static musl)
-        shell: alpine.sh {0}
+      - name: Clone and build
         run: |
-          git clone --depth 1 --branch ${{ github.event.inputs.valkey_tag }} https://github.com/valkey-io/valkey.git
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ github.event.inputs.valkey_tag }}" https://github.com/valkey-io/valkey.git
           cd valkey
-          # valkey's Makefile appends -rdynamic to the final link flags for
-          # loadable-module symbol resolution. -rdynamic forces a dynamic
-          # executable and silently defeats -static. We load no modules, so
-          # strip -rdynamic to get a truly static binary.
-          sed -i 's/-rdynamic//g' src/Makefile
-          # -no-pie alongside -static: Alpine's gcc defaults to PIE, and the
-          # implicit -pie overrides -static (yielding a dynamic PIE against
-          # ld-musl). -no-pie removes that conflict so -static produces a
-          # classic, fully static binary. V=1 prints the real link command.
-          make -j"$(nproc)" V=1 \
-            MALLOC=libc \
-            BUILD_TLS=no \
-            LDFLAGS="-static -no-pie" \
-            noopt="" \
-            valkey-server
-          # Fail loudly if the result is not actually static: a dynamic
-          # binary would silently reintroduce the host-library dependency
-          # this whole build exists to remove. A static binary references
-          # no .so; any .so line means the link was not static.
-          if ldd src/valkey-server 2>&1 | grep -q '\.so'; then
-            echo "ERROR: valkey-server is dynamically linked (expected static)" >&2
-            ldd src/valkey-server >&2 || true
-            exit 1
-          fi
+          # valkey-cli is built for the launch guard only, never released.
+          make -j"$(nproc)" MALLOC=libc BUILD_TLS=no valkey-server valkey-cli
 
-      - name: Prepare binary
-        shell: alpine.sh {0}
+      # What the binary asks of the host is exactly what the installer checks
+      # before downloading it: no library beyond glibc's libc and libm, no
+      # symbol version newer than the floor. The Lua engine's entry point
+      # must stay exported, or the server cannot find it at start.
+      - name: Check what the binary needs from the host
         run: |
+          set -euo pipefail
+          BIN=valkey/src/valkey-server
+          NEEDED="$(readelf -d "${BIN}" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort | tr '\n' ' ')"
+          echo "NEEDED: ${NEEDED}"
+          [ "${NEEDED}" = "libc.so.6 libm.so.6 " ] || { echo "ERROR: unexpected library dependencies" >&2; exit 1; }
+          NEWEST="$(objdump -T "${BIN}" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -uV | tail -1)"
+          echo "Newest glibc symbol version: ${NEWEST}"
+          [ "$(printf '%s\nGLIBC_2.35\n' "${NEWEST}" | sort -V | tail -1)" = "GLIBC_2.35" ] \
+            || { echo "ERROR: ${NEWEST} is newer than the GLIBC_2.35 floor" >&2; exit 1; }
+          # Counted, not grep -q: under pipefail an early-exiting grep would
+          # fail the pipeline through nm's SIGPIPE.
+          [ "$(nm -D "${BIN}" | grep -c ' ValkeyModule_OnLoad_lua$')" = "1" ] \
+            || { echo "ERROR: the Lua engine entry point is not exported" >&2; exit 1; }
+          echo "Symbol versions per library (pinned by the installer):"
+          readelf -V "${BIN}" | awk '/Version needs section/,0'
+
+      - name: Prepare binaries
+        run: |
+          set -euo pipefail
           FILENAME="valkey-server-linux-${{ matrix.arch }}"
           cp valkey/src/valkey-server "${FILENAME}"
-          chmod 755 "${FILENAME}"
+          cp valkey/src/valkey-cli "valkey-cli-linux-${{ matrix.arch }}"
+          chmod 755 "${FILENAME}" "valkey-cli-linux-${{ matrix.arch }}"
           sha256sum "${FILENAME}" > "${FILENAME}.sha256"
 
-      - name: Upload artifact
+      - name: Upload the server
         uses: actions/upload-artifact@v7
         with:
           name: valkey-server-linux-${{ matrix.arch }}
           path: |
             valkey-server-linux-${{ matrix.arch }}
             valkey-server-linux-${{ matrix.arch }}.sha256
+
+      - name: Upload the client (guard only)
+        uses: actions/upload-artifact@v7
+        with:
+          name: valkey-cli-linux-${{ matrix.arch }}
+          path: valkey-cli-linux-${{ matrix.arch }}
 
   build-macos:
     # macOS is self-contained by design: binaries link against libSystem,
@@ -106,7 +105,12 @@ jobs:
       - name: Clone valkey-io/valkey
         run: git clone --depth 1 --branch ${{ github.event.inputs.valkey_tag }} https://github.com/valkey-io/valkey.git
 
+      # macOS 13 is the oldest macOS Gabion installs on (the same floor its
+      # telephony engines check); without a deployment target the binary
+      # would require the build runner's own macOS.
       - name: Build
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: |
           cd valkey
           make -j"$(sysctl -n hw.ncpu)" \
@@ -133,20 +137,67 @@ jobs:
             valkey-server-darwin-${{ matrix.arch }}.sha256
 
   # The launch guard: every binary is started on a machine of its own
-  # architecture and must report the tag it was built from. A file that
-  # exists proves nothing, and the arm64 Linux build runs under QEMU, where
-  # a check proves nothing either — so verification is a separate job on
-  # native runners, and the release waits for all of them.
-  verify:
-    needs: [build-linux, build-macos]
+  # architecture, must report the tag it was built from, serve on localhost
+  # with the arguments Gabion's dev process uses and run a Lua script —
+  # Gabion's rate limiter (bucket4j over Lettuce) runs its compare-and-swap
+  # as one, and since 9.1 Lua is a module of the build. Linux binaries run
+  # inside clean containers of the oldest and newest distributions Gabion
+  # meets, each with nothing installed; macOS on the two newest releases.
+  verify-linux:
+    needs: [build-linux]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - file: valkey-server-linux-amd64
+          - arch: amd64
             runner: ubuntu-24.04
-          - file: valkey-server-linux-arm64
+            images: "ubuntu:22.04 ubuntu:24.04 ubuntu:26.04 debian:12 debian:13 rockylinux/rockylinux:9 fedora:latest amazonlinux:2023 archlinux:latest"
+          - arch: arm64
             runner: ubuntu-24.04-arm
+            images: "ubuntu:22.04 ubuntu:24.04 ubuntu:26.04 debian:12 debian:13 rockylinux/rockylinux:9 fedora:latest amazonlinux:2023"
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Download the server and the client
+        uses: actions/download-artifact@v8
+        with:
+          pattern: valkey-*-linux-${{ matrix.arch }}
+          merge-multiple: true
+
+      - name: Serve and run a Lua script on every distribution
+        run: |
+          set -euo pipefail
+          mkdir t
+          cp "valkey-server-linux-${{ matrix.arch }}" t/valkey-server
+          cp "valkey-cli-linux-${{ matrix.arch }}" t/valkey-cli
+          chmod 755 t/valkey-server t/valkey-cli
+          cat > t/run.sh <<'EOF'
+          set -eu
+          cd /t
+          ./valkey-server --version | grep -q "v=$1 "
+          ./valkey-server --port 46379 --set-proc-title no --bind 127.0.0.1 \
+            --protected-mode yes --save "" --appendonly no --loglevel notice > /tmp/server.log 2>&1 &
+          for _ in $(seq 1 100); do
+            grep -q "Ready to accept connections" /tmp/server.log && break
+            sleep 0.1
+          done
+          grep -q "Ready to accept connections" /tmp/server.log || { cat /tmp/server.log; exit 1; }
+          REPLY="$(./valkey-cli -p 46379 EVAL "return 7" 0)"
+          echo "EVAL reply: ${REPLY}"
+          [ "${REPLY}" = "7" ]
+          EOF
+          for IMAGE in ${{ matrix.images }}; do
+            echo "::group::${IMAGE}"
+            docker run --rm -v "${PWD}/t:/t:ro" "${IMAGE}" sh /t/run.sh "${{ github.event.inputs.valkey_tag }}"
+            echo "::endgroup::"
+          done
+
+  verify-macos:
+    needs: [build-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - file: valkey-server-darwin-arm64
             runner: macos-26
           - file: valkey-server-darwin-arm64
@@ -163,25 +214,13 @@ jobs:
         with:
           name: ${{ matrix.file }}
 
-      - name: Start it and read its version
-        run: |
-          set -euo pipefail
-          chmod 755 "${{ matrix.file }}"
-          OUT="$(./${{ matrix.file }} --version)"
-          echo "${OUT}"
-          echo "${OUT}" | grep -q "v=${{ github.event.inputs.valkey_tag }} "
-          if [ "$(uname -s)" = "Linux" ] && ldd "${{ matrix.file }}" 2>&1 | grep -q '\.so'; then
-            echo "ERROR: ${{ matrix.file }} is dynamically linked (expected static)" >&2
-            exit 1
-          fi
-
-      # Gabion's rate limiter (bucket4j over Lettuce) runs its
-      # compare-and-swap as a Lua script, and since 9.1 Lua is a separate
-      # module of the build — so the guard runs one. Arguments and the
-      # readiness line are the ones Gabion's dev process uses.
       - name: Serve and run a Lua script
         run: |
           set -euo pipefail
+          chmod 755 "${{ matrix.file }}"
+          VERSION="$(./${{ matrix.file }} --version)"
+          echo "${VERSION}"
+          case "${VERSION}" in *"v=${{ github.event.inputs.valkey_tag }} "*) ;; *) exit 1 ;; esac
           PORT=46379
           ./${{ matrix.file }} --port "${PORT}" --set-proc-title no --bind 127.0.0.1 \
             --protected-mode yes --save "" --appendonly no --loglevel notice > server.log 2>&1 &
@@ -198,13 +237,14 @@ jobs:
           [ "${REPLY}" = ":7" ]
 
   release:
-    needs: [verify]
+    needs: [verify-linux, verify-macos]
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download all artifacts
+      - name: Download the servers
         uses: actions/download-artifact@v8
         with:
+          pattern: valkey-server-*
           merge-multiple: true
 
       # Valkey is BSD-3-Clause software, and the license asks for its notice
@@ -224,13 +264,16 @@ jobs:
           body: |
             Pre-built Valkey server binaries from [valkey-io/valkey](https://github.com/valkey-io/valkey) tag `${{ github.event.inputs.valkey_tag }}`.
 
-            Linux binaries are statically linked against musl: they run on any
-            Linux host (glibc or musl) with no system libraries installed.
-            macOS binaries link against libSystem (always present).
+            Linux binaries are built on Ubuntu 22.04 and need only glibc 2.35 or
+            newer (libc and libm) from the host: they run on any glibc
+            distribution of that age or newer with nothing else installed.
+            musl distributions (Alpine) are not supported.
+            macOS binaries link against libSystem (always present) and need
+            macOS 13 or newer.
 
             ## Platforms
-            - `valkey-server-linux-amd64` — Linux x64 (static, musl)
-            - `valkey-server-linux-arm64` — Linux ARM64 (static, musl)
+            - `valkey-server-linux-amd64` — Linux x64 (glibc 2.35+)
+            - `valkey-server-linux-arm64` — Linux ARM64 (glibc 2.35+)
             - `valkey-server-darwin-amd64` — macOS x64 (Intel)
             - `valkey-server-darwin-arm64` — macOS ARM64 (Apple Silicon)
 
