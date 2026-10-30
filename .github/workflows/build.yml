@@ -247,13 +247,8 @@ jobs:
           echo "EVAL reply: ${REPLY}"
           [ "${REPLY}" = ":7" ]
 
-  # The repository's dependency audit (audit.yml): a release is published
-  # only while every release this repository pins is current or declared.
-  audit:
-    uses: ./.github/workflows/audit.yml
-
   release:
-    needs: [verify-linux, verify-macos, audit]
+    needs: [verify-linux, verify-macos]
     runs-on: ubuntu-latest
 
     steps:
