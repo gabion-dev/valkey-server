@@ -34,6 +34,8 @@ macOS binaries link against libSystem, which is always present, and target macOS
 
 Before a release is published, every binary is started on a native machine of its own architecture and must report the tag it was built from, serve on localhost and run a Lua script: on Linux inside clean containers of Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13, Rocky Linux 9, Fedora, Amazon Linux 2023 and (x64) Arch Linux; on macOS 15 and 26, Apple Silicon and Intel.
 
+A release is also published only when the dependency audit of this repository passes ([`.github/workflows/audit.yml`](.github/workflows/audit.yml), also run by hand from the Actions tab): every GitHub Action the workflows pin is its newest release, or a lag declared in `gabion-audit.json` with its reason.
+
 These are development binaries optimized for portability, not production performance. For production deployments, use the official Valkey packages with jemalloc and TLS support.
 
 ## Source & License
